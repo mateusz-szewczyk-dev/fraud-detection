@@ -9,6 +9,7 @@ import os
 import re
 import time
 import uuid
+import warnings
 from contextlib import contextmanager, redirect_stdout
 from datetime import datetime, timezone
 from functools import partial
@@ -83,11 +84,18 @@ def kfp_client():
     import kfp
 
     env = settings()
-    return kfp.Client(
-        host=required("KFP_ENDPOINT"), namespace=required("RHOAI_PROJECT"),
-        existing_token=required("RHOAI_TOKEN"),
-        ssl_ca_cert=env.get("REQUESTS_CA_BUNDLE") or None,
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"^This client only works with Kubeflow Pipeline v2\.0\.0-beta\.2 and later versions\.$",
+            category=FutureWarning,
+            module=r"^kfp\.client\.client$",
+        )
+        return kfp.Client(
+            host=required("KFP_ENDPOINT"), namespace=required("RHOAI_PROJECT"),
+            existing_token=required("RHOAI_TOKEN"),
+            ssl_ca_cert=env.get("REQUESTS_CA_BUNDLE") or None,
+        )
 
 
 def load_data():
