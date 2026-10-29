@@ -55,15 +55,15 @@ The `.env` file and `automl/outputs/` are excluded from Git. Outputs embedded in
 
 == Run the linked notebooks
 
-. Open `automl/00_prepare_data.ipynb`. Run the dependency installation cell, inspect class imbalance, and upload the prepared CSVs. By default, `train.csv` and `validate.csv` are merged into 800,000 training rows; `test.csv` remains a separate 200,000-row evaluation set. The notebook records the actual row counts, fraud rates, hashes, and S3 paths in `outputs/data_manifest.json`.
+. Open `automl/00_prepare_data.ipynb`. Run the dependency installation cell and choose your local CSV paths in `DATA_FILES`. The defaults use the repository's files: `train.csv` and `validate.csv` are merged into 800,000 training rows; `test.csv` remains a separate 200,000-row evaluation set. For your own train and test files without validation, set `validate` to `None` and `MERGE_VALIDATION = False`. Relative paths start from `automl/`; absolute paths are also supported. Inspect the source and prepared train/test tables before uploading. The notebook records source paths, actual row counts, fraud rates, hashes, and S3 locations in `outputs/data_manifest.json`.
 +
 All seven feature columns retain their original names: `distance_from_home`, `distance_from_last_transaction`, `ratio_to_median_purchase_price`, `repeat_retailer`, `used_chip`, `used_pin_number`, and `online_order`. The target is `fraud`. The sample does not manually scale, filter, or resample the features.
-. Open `automl/01_experiment.ipynb`. Inspect the installed pipeline's parameters and submit the experiment with `label_column=fraud`, `task_type=binary`, and the external test CSV through `test_data_*`. The defaults are `preset=speed` and `eval_metric=roc_auc`. Record the run ID and pipeline version and use the displayed dashboard links to inspect the run.
+. Open `automl/01_experiment.ipynb`. Review or edit `EXPERIMENT_NAME` and `EXPERIMENT_OPTIONS`, then compare the requested inputs with any saved run. Submit the experiment with `label_column=fraud`, `task_type=binary`, and the uploaded external test CSV through `test_data_*`. The defaults are `preset=speed` and `eval_metric=roc_auc`. Record the run ID and pipeline version and use the displayed dashboard links to inspect the run.
 +
 Leave `START_NEW_RUN = False` to submit the first run and reuse it on later executions, including if that run failed. To submit another experiment, set it to `True` for one execution, then set it back to `False`. Each execution with `True` creates another run.
 +
 Monitor the saved run. Interrupting the monitoring cell or reaching its local timeout does not cancel cluster training. Rerun the cell to resume monitoring; cancel unwanted runs through *Pipelines → Runs*. For a failure, inspect task logs and pod termination reasons before recording an out-of-memory failure.
-. Open `automl/02_results.ipynb`. Verify that the external test artifact matches the repository's test data, inspect the leaderboard, and record the selected predictor's evaluation score. Follow the displayed links to the official experiment and selected predictor notebooks downloaded from this run's artifacts.
+. Open `automl/02_results.ipynb`. Verify that the external test artifact matches the uploaded test CSV recorded for this run, inspect the leaderboard, and record the selected predictor's evaluation score. Follow the displayed links to the official experiment and selected predictor notebooks downloaded from this run's artifacts.
 +
 Follow those generated notebooks' dependency instructions, using a separate kernel if needed. Use the same storage credentials with `AWS_S3_BUCKET` pointing at the artifact bucket. The generated predictor notebook supports local probability predictions; notebook 03 uses REST serving.
 . Open `automl/03_predictor.ipynb` and choose one deployment method:
@@ -74,7 +74,7 @@ Follow those generated notebooks' dependency instructions, using a separate kern
 
 Configure model inference access for the identity used to score transactions. The programmatic deployment enables authentication. Automatic credentials follow the current Kubernetes identity; renew `oc login` if a static login expires. Use `PREDICT_AUTH_MODE=none` only for an endpoint configured to allow unauthenticated requests; this setting does not disable server authentication.
 --
-. Once the model is ready, use its base inference URL as `PREDICT_ENDPOINT`, without a `/v1/...` suffix, or let Option B discover it. Run the scoring cell for Sally's transactions. The helper sends the seven named features in the runtime's KServe v1 request format.
+. Once the model is ready, use its base inference URL as `PREDICT_ENDPOINT`, without a `/v1/...` suffix, or let Option B discover it. Leave `SCORING_CSV=None` for Sally's transactions, or choose a CSV with the same seven features and set `SCORING_ROW_LIMIT` for a small smoke-test batch. An optional `fraud` label column is removed before sending requests. The helper sends the seven named features in the runtime's KServe v1 request format.
 +
 The REST response contains predicted class labels, such as `0` or `1`. Do not interpret these as fraud probabilities or apply the original ONNX probability thresholds. A successful smoke test requires a valid prediction response; a Ready deployment alone does not verify inference.
 
@@ -99,8 +99,8 @@ manifest = wf.read("data_manifest.json")
 manifest["connection"] = wf.required("S3_CONNECTION_NAME")
 wf.save("data_manifest.json", manifest)
 ----
-* To change the preset or metric, update `.env` and submit a new run. Reuse the staged data.
-* To change dataset contents, merging, or input bucket/prefix, rerun notebook 00's upload cell, reload the manifest in notebook 01, and submit a new run.
+* To change the preset or metric, edit notebook 01's settings cell or `.env`, rerun the preview, and submit a new run. Reuse the staged data.
+* To change CSV paths, dataset contents, merging, or input bucket/prefix, rerun notebook 00's settings, loading, preview, and upload cells, reload the manifest in notebook 01, and submit a new run.
 * To correct artifact discovery, check the run's actual output URIs, update only `artifact_bucket` or `artifact_prefix` in `outputs/run.json`, and rerun notebook 02. Retraining is unnecessary.
 * To change prediction credentials or the endpoint, update `.env` and rerun scoring. Clear stale `PREDICT_TOKEN` overrides from the environment as well as the file when using automatic credentials.
 
