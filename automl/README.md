@@ -14,11 +14,32 @@ Use the seven feature columns in the repository CSV files, with `fraud` as the b
 
 Start with [00_prepare_data.ipynb](00_prepare_data.ipynb). Its first cell installs the notebook dependencies; restart the kernel if prompted. The same environment can also be prepared with `python -m pip install -r automl/requirements.txt` from the repository root. Local execution additionally needs network access to the cluster and S3, plus `oc login`/kubeconfig for programmatic deployment. A workbench uses its ServiceAccount permissions for Kubernetes operations; the pipeline API token does not grant those permissions.
 
+## Choose your data and experiment settings
+
+Notebook 00 has an editable `DATA_FILES` cell for the local training, test, and optional validation CSVs. It shows resolved paths, source statistics, and the actual prepared train/test row counts before uploading. Relative paths start from `automl/`; absolute paths and `~/` paths also work. Defaults can be set with `TRAIN_CSV`, `TEST_CSV`, and `VALIDATION_CSV` in `.env`.
+
+For your own train and test files without validation, use:
+
+```python
+DATA_FILES = {
+    'train': '/path/to/train.csv',
+    'test': '/path/to/test.csv',
+    'validate': None,
+}
+MERGE_VALIDATION = False
+```
+
+Each supplied file must contain the seven original numeric feature columns and the binary `fraud` label, including both classes. This remains a fraud-detection sample; changing the target or feature schema requires updating the rest of the flow. The external test data is never merged into training. If you supply your own validation CSV, set `MERGE_VALIDATION = True` to add it to training. Rerun the loading, preview, and upload cells after changing a path or merge setting.
+
+Notebook 01 exposes `EXPERIMENT_NAME` and `EXPERIMENT_OPTIONS` (`preset`, `metric`, `top_n`) before submission. Values start from `.env`; edits in the notebook apply to that session without changing the file or environment. The preview compares requested pipeline inputs against any saved run. `START_NEW_RUN=False` resumes the recorded run with its original inputs; use `True` once to apply changed data or settings.
+
+Notebook 02 verifies results against the exact test CSV uploaded for that run, including its SHA-256, rather than the current local file. Notebook 03 shows deployment settings without credentials and offers `SCORING_CSV` plus `SCORING_ROW_LIMIT` for a small REST smoke-test batch. Leave `SCORING_CSV=None` for Sally's examples. An optional `fraud` column in a scoring CSV is removed before prediction; full-dataset evaluation remains in notebook 02. Connection credentials and cluster/deployment settings stay in `.env`.
+
 ## Notebook sequence
 
 | Notebook | What it does | Saved evidence |
 | --- | --- | --- |
-| [00 — Prepare data](00_prepare_data.ipynb) | Explore class imbalance, validate all columns, optionally merge validation data, upload unique input copies to S3 | Data manifest, row counts, class rates, SHA-256 hashes, S3 URIs |
+| [00 — Prepare data](00_prepare_data.ipynb) | Choose local CSV paths, inspect source and prepared train/test datasets, optionally merge validation data, upload unique input copies to S3 | Data manifest, source paths, row counts, class rates, SHA-256 hashes, S3 URIs |
 | [01 — Experiment](01_experiment.ipynb) | Resolve the installed managed pipeline/version, check inputs, submit and monitor | Run ID, pipeline version, actual arguments, status and duration |
 | [02 — Results](02_results.ipynb) | Validate external test artifact, rank predictors by the configured metric (`roc_auc`, `f1` or `accuracy`), show leaderboard, retrieve official experiment and predictor notebooks | Holdout scores, selected predictor URI, artifact index, generated notebook links |
 | [03 — Predictor](03_predictor.ipynb) | Deploy using the installed `kserve-autogluon-server` runtime and an existing Connection; send REST requests with seven named features | Deployment manifests, prediction response, ticket comment |
@@ -44,8 +65,9 @@ Saved experiment state is separate from the live configuration:
 | Change | What to do | Upload CSVs again? |
 | --- | --- | --- |
 | Correct `S3_CONNECTION_NAME` | Update the local manifest as shown below; submit a new experiment using `START_NEW_RUN = True` | No, if the new Connection can read the existing S3 paths |
-| Change preset, metric, top N, pipeline version or experiment name | Update `.env`; submit a new experiment explicitly | No |
-| Change dataset contents, `MERGE_VALIDATION`, or the desired input bucket/prefix | Update configuration and rerun notebook 00's upload cell; reload `manifest` in notebook 01 and submit a new experiment | Yes; editing configuration does not move existing objects |
+| Change preset, metric, top N or experiment name | Edit notebook 01's settings cell or `.env`; rerun the preview and submit a new experiment explicitly | No |
+| Change pipeline version | Update `.env`; submit a new experiment explicitly | No |
+| Change CSV paths, dataset contents, `MERGE_VALIDATION`, or the desired input bucket/prefix | Rerun notebook 00's settings, loading, preview and upload cells; reload `manifest` in notebook 01 and submit a new experiment | Yes; editing configuration does not move existing objects |
 | Correct the artifact bucket/prefix for an existing run | Verify its actual output URIs, correct only `artifact_bucket` / `artifact_prefix` in `run.json`, then rerun notebook 02 | No; `.env` does not change pipeline server output storage |
 | Change prediction endpoint/token or authentication mode | Update `.env` and rerun the scoring cell; renew `oc login` when needed | No |
 | Change model/runtime name or serving resources | Regenerate manifests, then deploy; existing resources with different requested fields must be reviewed or given new names | No |
@@ -77,6 +99,7 @@ For Option B, the Connection stored in `run.json` must point at the artifact buc
 - Endpoint still shows `YOUR_REGION` after editing `.env`: check that the edited file is `automl/.env`. The updated loader reads file changes on each call without caching them in the kernel environment. If an earlier version already loaded the placeholder, restart the kernel once. Workbench environment variables still override the file; correct any placeholder in the attached Connection/workbench configuration as well.
 - No artifacts: inspect the successful run's output URIs in Pipelines. Check `S3_ARTIFACTS_BUCKET` and the artifact prefix convention. For an existing run update only `artifact_bucket`/`artifact_prefix` in `outputs/run.json`; rerun notebook 02. Do not start training again just to locate artifacts.
 - Failed/OOM: inspect failed task logs and pod termination reasons; record `OOMKilled` only if observed. Check quota and workspace storage before trying again.
+- Pipeline monitoring HTTP 401: the `RHOAI_TOKEN` may have expired or the client may hold an older token. Renew `oc login` if needed, obtain the current token with `oc whoami -t`, and update `RHOAI_TOKEN` in `.env`. Check for a workbench/kernel environment override. Rerun notebook 01's monitoring cell: `wf.monitor_experiment()` creates a fresh client and resumes the saved run ID. This does not upload data, submit another run, or cancel training. HTTP 403 requires checking the token identity's permission to read runs on that project's pipeline server. Inference credentials (`PREDICT_TOKEN`) are separate.
 - Predictor not ready: inspect model events, storage initializer logs, Connection endpoint/bucket, runtime version and memory. An AlreadyExists response is handled by checking and reusing matching resources, so rerunning the creation cell can complete a partial deployment. If requested fields differ, review the reported fields in the dashboard or choose another MODEL_NAME/SERVING_RUNTIME_NAME and regenerate the manifests. No existing resources are patched or deleted.
 - HTTP 401/403: in auto mode renew `oc login` or check the workbench identity and its model inference permissions. A nonempty `PREDICT_TOKEN` overrides automatic credentials; clear any stale override from both `.env` and the kernel environment. Credentials are read per prediction without being written to disk; static expired tokens still require renewing the login. The helper does not mint tokens, grant model access or disable deployment authentication. For an intentionally public endpoint, use `PREDICT_AUTH_MODE=none` to omit Authorization; `token` mode requires an explicit `PREDICT_TOKEN`. HTTP 404: verify the base endpoint and that `MODEL_NAME` matches the deployed service. The REST contract is KServe v1 `instances` containing dictionaries with one-element column lists (for example, `"used_chip": [1.0]`). The helper converts the notebook's scalar records into that runtime format; the original five-feature ONNX tensor is not used.
 - HTTP 500: inspect the server response included in the exception and the `kserve-container` logs, for example `oc logs -n YOUR_PROJECT -l serving.kserve.io/inferenceservice=fraud-automl -c kserve-container --tail=100`. The helper truncates response details and redacts credentials known to the request. Check the actual traceback before changing request format, runtime version or model artifacts; HTTP 500 alone does not establish the cause. A Ready service can still fail a prediction.
