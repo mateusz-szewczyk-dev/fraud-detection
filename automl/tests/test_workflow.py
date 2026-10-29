@@ -207,12 +207,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(client.run_pipeline.call_args.kwargs["params"], args)
 
     def test_dashboard_links_use_saved_project_and_rhoai_paths(self):
-        base = "https://rh-ai.apps.rosa.ai-eng-prod.wrh7.p3.openshiftapps.com"
-        run_id = "5ff5b403-f906-4901-b3b2-45d53f1b3954"
+        base = "https://rh-ai.apps.example.com"
+        run_id = "example-run-id"
         with patch.dict(os.environ, {"RHOAI_DASHBOARD_URL": base + "/", "RHOAI_PROJECT": "other"}):
-            links = wf.run_links({"project": "mszewczy", "run_id": run_id})
-        self.assertEqual(links["Run details"], f"{base}/develop-train/pipelines/runs/mszewczy/runs/{run_id}")
-        self.assertEqual(links["AutoML results"], f"{base}/develop-train/automl/results/mszewczy/{run_id}")
+            links = wf.run_links({"project": "your-project", "run_id": run_id})
+        self.assertEqual(links["Run details"], f"{base}/develop-train/pipelines/runs/your-project/runs/{run_id}")
+        self.assertEqual(links["AutoML results"], f"{base}/develop-train/automl/results/your-project/{run_id}")
 
     def test_dashboard_links_optional_and_validate_url(self):
         self.assertEqual(wf.run_links({"project": "fraud", "run_id": "id"}), {})
@@ -509,15 +509,13 @@ class WorkflowTests(unittest.TestCase):
 
 
 class NotebookTests(unittest.TestCase):
-    def test_notebooks_validate_and_have_no_saved_outputs(self):
+    def test_notebooks_validate_and_have_valid_python(self):
         root = Path(__file__).resolve().parents[1]
         for path in sorted(root.glob("*.ipynb")):
             notebook = nbformat.read(path, as_version=4)
             nbformat.validate(notebook)
             for cell in notebook.cells:
                 if cell.cell_type == "code":
-                    self.assertEqual(cell.outputs, [])
-                    self.assertIsNone(cell.execution_count)
                     transformed = "\n".join(line for line in cell.source.splitlines()
                                             if not line.lstrip().startswith("%"))
                     ast.parse(transformed, filename=path.name)

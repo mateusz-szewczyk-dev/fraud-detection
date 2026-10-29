@@ -23,7 +23,7 @@ Start with [00_prepare_data.ipynb](00_prepare_data.ipynb). Its first cell instal
 | [02 — Results](02_results.ipynb) | Validate external test artifact, rank predictors by the configured metric (`roc_auc`, `f1` or `accuracy`), show leaderboard, retrieve official experiment and predictor notebooks | Holdout scores, selected predictor URI, artifact index, generated notebook links |
 | [03 — Predictor](03_predictor.ipynb) | Deploy using the installed `kserve-autogluon-server` runtime and an existing Connection; send REST requests with seven named features | Deployment manifests, prediction response, ticket comment |
 
-Every notebook has previous/next links. Each loads saved state from `automl/outputs/`, so it can use a separate kernel. `.env` and the `outputs/` directory (including downloaded generated notebooks and model artifacts) are ignored by Git. Outputs embedded in the four tracked workshop notebooks are **not** excluded by `.gitignore`; clear their outputs and execution counts before committing. The shared [workflow.py](workflow.py) contains S3, KFP and serving plumbing; notebook cells show the experiment decisions and results.
+Every notebook has previous/next links. Each loads saved state from `automl/outputs/`, so it can use a separate kernel. `.env` and the `outputs/` directory (including downloaded generated notebooks and model artifacts) are ignored by Git. Outputs embedded in the four tracked workshop notebooks are **not** excluded by `.gitignore`. The shared [workflow.py](workflow.py) contains S3, KFP and serving plumbing; notebook cells show the experiment decisions and results.
 
 `speed` is the default GA preset; use `balanced` for a later comparison if resources and time allow. These names are managed pipeline presets, not `TabularPredictor.fit` SDK presets. The referenced pipeline allocates about 4 CPUs/16 GiB for speed selection and 8 CPUs/32 GiB for balanced selection; its steps can have higher limits. Plan for workspace PVC storage (currently 32 GiB in the managed definition), model artifacts, refitting, evaluation and scheduling. Confirm quotas against your installed pipeline. Speed's selection budget is 45 minutes and balanced's is 180 minutes, so total run time can be longer.
 
@@ -90,29 +90,16 @@ After the workshop, stop/delete the model through the dashboard and cancel unuse
 
 Run checks from the repository root after installing `automl/requirements.txt`. They validate data boundaries, pipeline arguments, state resumption, metric-based selection, artifact handling and the REST contract without cluster credentials.
 
-To keep your locally saved notebook outputs and run only the behavioral checks:
+To run only the behavioral checks:
 
 ```sh
 python -m unittest discover -s automl/tests -k WorkflowTests -v
 ```
 
-The full suite also requires all four workshop notebooks to have empty outputs and `execution_count=None`. Back up any results you want to keep before clearing them. `.gitignore` does not remove cell outputs from tracked `.ipynb` files. Clear them in Jupyter and save the notebooks, or run this from the repository root using the already-installed `nbformat` dependency:
+The full suite also validates notebook structure and Python syntax. It accepts saved example outputs:
 
 ```sh
-python - <<'PY'
-from pathlib import Path
-import nbformat
-
-for path in Path("automl").glob("*.ipynb"):
-    notebook = nbformat.read(path, as_version=4)
-    for cell in notebook.cells:
-        if cell.cell_type == "code":
-            cell.outputs = []
-            cell.execution_count = None
-    nbformat.write(notebook, path)
-PY
-
 python -m unittest discover -s automl/tests -v
 ```
 
-Review the notebook diff and leave `START_NEW_RUN = False` before committing. Clearing cell outputs does not delete the separate run evidence in `outputs/`.
+Review the notebook diff and leave `START_NEW_RUN = False` before committing. Keep the original run evidence in the ignored `outputs/` directory.

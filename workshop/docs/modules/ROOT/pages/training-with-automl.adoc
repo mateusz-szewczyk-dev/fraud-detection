@@ -51,7 +51,7 @@ Ask your administrator to enable missing components or permissions. The notebook
 For programmatic deployment in notebook 03, the Connection recorded for the run must have `AWS_S3_BUCKET` equal to the artifact bucket. If the input and artifact buckets differ, create a second Connection for the artifact bucket and use dashboard deployment instead. Workbench credentials with access to both buckets are sufficient for reading results, but do not satisfy the programmatic deployment helper's bucket check.
 ====
 
-The `.env` file and `automl/outputs/` are excluded from Git. Outputs embedded in the tracked workshop notebooks are not excluded; clear notebook outputs and execution counts before committing.
+The `.env` file and `automl/outputs/` are excluded from Git. Outputs embedded in the tracked workshop notebooks are included. You can keep useful example outputs, but replace personal project names, cluster addresses, bucket names, and local paths with generic placeholders before committing. Saved outputs illustrate a previous run; execute the cells to obtain your own results.
 
 == Run the linked notebooks
 
