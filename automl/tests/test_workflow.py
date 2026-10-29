@@ -118,6 +118,69 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(manifest["datasets"]["train"]["rows"], 4)
         self.assertEqual(manifest["datasets"]["test"]["rows"], 4)
 
+    def test_custom_csv_paths_without_validation_and_explicit_merge_choice(self):
+        custom = self.root / "custom"
+        custom.mkdir()
+        train_path, test_path = custom / "fit.csv", custom / "evaluate.csv"
+        self.frames["train"].iloc[:3].assign(fraud=[0, 1, 0]).to_csv(train_path, index=False)
+        self.frames["test"].iloc[:2].assign(fraud=[0, 1]).to_csv(test_path, index=False)
+        frames = wf.load_data({"train": "../custom/fit.csv", "test": test_path, "validate": None})
+        preview = wf.prepared_datasets(frames, merge_validation=False)
+        manifest = wf.stage_data(frames, self.s3, merge_validation=False)
+        self.assertEqual(set(frames), {"train", "test"})
+        self.assertFalse(manifest["merged_validation"])
+        self.assertEqual(manifest["source_paths"]["train"], str(train_path.resolve()))
+        self.assertEqual(manifest["datasets"]["train"]["rows"], 3)
+        self.assertEqual(manifest["datasets"]["test"]["rows"], 2)
+        for role in ("train", "test"):
+            uploaded = pd.read_csv(io.BytesIO(self.s3.objects[("bucket", manifest["datasets"][role]["key"])]))
+            pd.testing.assert_frame_equal(uploaded, preview[role])
+
+    def test_csv_paths_can_be_configured_in_environment(self):
+        with patch.dict(os.environ, {"TRAIN_CSV": "../data/train.csv", "TEST_CSV": "../data/test.csv",
+                                     "VALIDATION_CSV": "", "MERGE_VALIDATION": "false"}):
+            frames = wf.load_data()
+            manifest = wf.stage_data(frames, self.s3)
+        self.assertEqual(set(frames), {"train", "test"})
+        self.assertEqual(manifest["datasets"]["train"]["rows"], 4)
+
+    def test_csv_selection_rejects_missing_files_and_shared_test_path(self):
+        for paths, exception, message in [
+            ({"train": "", "test": "../data/test.csv"}, ValueError, "Choose a train CSV"),
+            ({"train": "../data/train.csv", "test": "../data/train.csv"}, ValueError, "different files"),
+            ({"train": "../data/train.csv", "test": "missing.csv"}, FileNotFoundError, "test CSV not found"),
+        ]:
+            with self.subTest(paths=paths), self.assertRaisesRegex(exception, message):
+                wf.load_data(paths)
+
+    def test_missing_validation_fails_before_upload(self):
+        with self.assertRaisesRegex(ValueError, "requires a validation CSV"):
+            wf.stage_data({key: self.frames[key] for key in ("train", "test")}, self.s3)
+        self.assertEqual(self.s3.objects, {})
+
+    def test_explicit_experiment_options_override_env_without_mutation(self):
+        manifest = wf.stage_data(self.frames, self.s3)
+        args = wf.pipeline_arguments(manifest, preset="balanced", metric="f1", top_n=2)
+        self.assertEqual((args["preset"], args["eval_metric"], args["top_n"]), ("balanced", "f1", 2))
+        self.assertEqual(wf.pipeline_arguments(manifest)["preset"], "speed")
+        with self.assertRaisesRegex(ValueError, "integer"):
+            wf.pipeline_arguments(manifest, top_n="invalid")
+
+    def test_holdout_verification_uses_uploaded_snapshot_not_current_local_file(self):
+        self.add_artifacts()
+        (self.root / "data/test.csv").unlink()
+        with patch.dict(os.environ, {"TEST_CSV": "different.csv"}):
+            result = wf.collect_results(self.s3)
+        self.assertEqual(result["holdout_rows"], 4)
+
+    def test_holdout_verification_rejects_modified_s3_source(self):
+        run = self.add_artifacts()
+        test = run["data"]["datasets"]["test"]
+        self.s3.objects[("bucket", test["key"])] += b"\n"
+        with self.assertRaisesRegex(RuntimeError, "changed after staging"):
+            wf.collect_results(self.s3)
+        self.assertFalse((wf.OUTPUTS / "results.json").exists())
+
     def test_env_edits_are_read_without_retaining_old_values(self):
         wf.ROOT.mkdir(parents=True, exist_ok=True)
         path = wf.ROOT / ".env"
@@ -202,9 +265,13 @@ class WorkflowTests(unittest.TestCase):
                 "parameters": {name: {} for name in args}}}}, "platformSpec": {}})
         client.create_experiment.return_value = SimpleNamespace(experiment_id="experiment-id")
         client.run_pipeline.return_value = SimpleNamespace(run_id="wrapped-run")
-        record = wf.submit_experiment(client, manifest)
+        record = wf.submit_experiment(client, manifest, preset="balanced", metric="f1", top_n=2,
+                                      experiment_name="custom-experiment")
         self.assertEqual(record["run_id"], "wrapped-run")
-        self.assertEqual(client.run_pipeline.call_args.kwargs["params"], args)
+        self.assertEqual(client.run_pipeline.call_args.kwargs["params"],
+                         {**args, "preset": "balanced", "eval_metric": "f1", "top_n": 2})
+        self.assertEqual(record["experiment_name"], "custom-experiment")
+        self.assertEqual(client.create_experiment.call_args.kwargs["name"], "custom-experiment")
 
     def test_dashboard_links_use_saved_project_and_rhoai_paths(self):
         base = "https://rh-ai.apps.example.com"
@@ -261,6 +328,42 @@ class WorkflowTests(unittest.TestCase):
             wf.monitor_experiment(client)
         self.assertEqual(wf.read("run.json")["state"], "FAILED")
         self.assertIn("external test score: pending", wf.ticket_report())
+
+    def test_monitoring_recreates_client_and_resumes_saved_run(self):
+        self.record_run(state="RUNNING")
+        first, second = Mock(), Mock()
+        for client in (first, second):
+            client.get_run.return_value = SimpleNamespace(state="SUCCEEDED")
+        with patch.object(wf, "kfp_client", side_effect=[first, second]) as factory:
+            self.assertEqual(wf.monitor_experiment()["run_id"], "run-123")
+            self.assertEqual(wf.monitor_experiment()["run_id"], "run-123")
+        self.assertEqual(factory.call_count, 2)
+        for client in (first, second):
+            client.get_run.assert_called_once_with("run-123")
+            client.run_pipeline.assert_not_called()
+
+    def test_monitoring_auth_errors_preserve_state_and_hide_response(self):
+        from kfp_server_api.exceptions import ApiException
+
+        for status, message in [(401, "RHOAI_TOKEN may be expired"), (403, "can read runs")]:
+            with self.subTest(status=status):
+                self.record_run(state="RUNNING")
+                before = (wf.OUTPUTS / "run.json").read_bytes()
+                client = Mock()
+                client.get_run.side_effect = ApiException(status=status, reason="private-response-marker")
+                with self.assertRaisesRegex(RuntimeError, message) as caught:
+                    wf.monitor_experiment(client)
+                self.assertNotIn("private-response-marker", str(caught.exception))
+                self.assertEqual((wf.OUTPUTS / "run.json").read_bytes(), before)
+                client.run_pipeline.assert_not_called()
+
+    def test_monitoring_handles_auth_error_during_client_creation(self):
+        from kfp_server_api.exceptions import ApiException
+
+        self.record_run(state="RUNNING")
+        with patch.object(wf, "kfp_client", side_effect=ApiException(status=401)):
+            with self.assertRaisesRegex(RuntimeError, "update RHOAI_TOKEN"):
+                wf.monitor_experiment()
 
     def test_rest_named_features_and_failed_retry_clears_success(self):
         self.add_artifacts()

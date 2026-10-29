@@ -98,22 +98,68 @@ def kfp_client():
         )
 
 
-def load_data():
-    """Validate the repository schema without scaling, sampling or dropping features."""
+def data_path(value):
+    """Resolve local CSV paths relative to automl/, independently of notebook cwd."""
+    path = Path(value).expanduser()
+    return (path if path.is_absolute() else ROOT / path).resolve()
+
+
+def dataset_paths():
+    """Default source files; an empty VALIDATION_CSV disables that optional split."""
+    env = settings()
+    return {"train": env.get("TRAIN_CSV", "../data/train.csv"),
+            "test": env.get("TEST_CSV", "../data/test.csv"),
+            "validate": env.get("VALIDATION_CSV", "../data/validate.csv")}
+
+
+def merge_validation_enabled(value=None):
+    value = settings().get("MERGE_VALIDATION", "true") if value is None else value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in {"true", "false"}:
+        return value.strip().lower() == "true"
+    raise ValueError("MERGE_VALIDATION must be true or false")
+
+
+def load_data(paths=None):
+    """Load chosen local CSVs with the seven fraud features and binary label."""
     import numpy as np
     import pandas as pd
 
+    paths = dataset_paths() if paths is None else paths
+    for split in ("train", "test"):
+        if not paths.get(split):
+            raise ValueError(f"Choose a {split} CSV in notebook 00's dataset settings.")
+    unknown = set(paths) - {"train", "validate", "test"}
+    if unknown:
+        raise ValueError(f"Unknown dataset roles: {sorted(unknown)}")
+    resolved = {split: data_path(value) for split, value in paths.items() if value}
+    if len(set(resolved.values())) != len(resolved):
+        raise ValueError("Train, test and optional validation must use different files; test must stay out of training.")
     frames = {}
-    for split in ("train", "validate", "test"):
-        frame = pd.read_csv(ROOT.parent / "data" / f"{split}.csv")
+    for split, path in resolved.items():
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"{split} CSV not found: {path}. Edit DATA_FILES in notebook 00 "
+                "or TRAIN_CSV / TEST_CSV / VALIDATION_CSV in automl/.env. "
+                "For no validation file, set VALIDATION_CSV to an empty value and MERGE_VALIDATION=false."
+            )
+        frame = pd.read_csv(path)
         if set(frame.columns) != set(FEATURES + [LABEL]):
-            raise ValueError(f"Unexpected columns in {split}.csv: {frame.columns.tolist()}")
-        if frame.empty or not np.isfinite(frame.to_numpy(dtype=float)).all():
-            raise ValueError(f"Empty, missing or non-finite values in {split}.csv")
+            missing = sorted(set(FEATURES + [LABEL]) - set(frame.columns))
+            extra = sorted(set(frame.columns) - set(FEATURES + [LABEL]))
+            raise ValueError(f"Unexpected columns in {split} CSV ({path}). Missing: {missing}; extra: {extra}")
+        try:
+            numeric = frame.to_numpy(dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"All features and fraud labels in {split} CSV ({path}) must be numeric.") from exc
+        if frame.empty or not np.isfinite(numeric).all():
+            raise ValueError(f"Empty, missing or non-finite values in {split} CSV ({path})")
         if set(frame[LABEL].unique()) != {0, 1}:
-            raise ValueError(f"{split}.csv must contain both binary fraud classes")
+            raise ValueError(f"{split} CSV ({path}) must contain both binary fraud classes: 0 and 1")
         frame[LABEL] = frame[LABEL].astype(int)
         frames[split] = frame[FEATURES + [LABEL]]
+        frames[split].attrs["source_path"] = str(path)
     return frames
 
 
@@ -124,23 +170,31 @@ def data_summary(frames):
             for split, frame in frames.items()]
 
 
-def stage_data(frames, s3):
-    """Upload immutable per-experiment input copies and a manifest (no credentials)."""
+def prepared_datasets(frames, *, merge_validation=None):
+    """Use the same explicit train/test selection for the preview and the upload."""
     import pandas as pd
 
-    env = settings()
-    merge = env.get("MERGE_VALIDATION", "true").lower()
-    if merge not in {"true", "false"}:
-        raise ValueError("MERGE_VALIDATION must be true or false")
+    merge = merge_validation_enabled(merge_validation)
+    if merge and "validate" not in frames:
+        raise ValueError("MERGE_VALIDATION=True requires a validation CSV. Choose that file or set MERGE_VALIDATION=False.")
     train = (pd.concat([frames["train"], frames["validate"]], ignore_index=True)
-             if merge == "true" else frames["train"])
+             if merge else frames["train"])
+    return {"train": train, "test": frames["test"]}
+
+
+def stage_data(frames, s3, *, merge_validation=None):
+    """Upload immutable per-experiment input copies and a manifest (no credentials)."""
+    env = settings()
+    merge = merge_validation_enabled(merge_validation)
+    datasets = prepared_datasets(frames, merge_validation=merge)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
     prefix = env.get("S3_DATA_PREFIX", "fraud-detection/automl/data").strip("/") + "/" + stamp
     bucket = required("AWS_S3_BUCKET")
     manifest = {"bucket": bucket, "connection": required("S3_CONNECTION_NAME"),
-                "merged_validation": merge == "true", "features": FEATURES,
+                "merged_validation": merge, "features": FEATURES,
+                "source_paths": {split: frame.attrs.get("source_path") for split, frame in frames.items()},
                 "source_splits": data_summary(frames), "datasets": {}}
-    for split, frame in (("train", train), ("test", frames["test"])):
+    for split, frame in datasets.items():
         path = OUTPUTS / "data" / f"{split}.csv"
         path.parent.mkdir(parents=True, exist_ok=True)
         frame.to_csv(path, index=False)
@@ -160,15 +214,18 @@ def stage_data(frames, s3):
     return manifest
 
 
-def pipeline_arguments(manifest):
+def pipeline_arguments(manifest, *, preset=None, metric=None, top_n=None):
     env = settings()
-    preset = env.get("AUTOML_PRESET", "speed")
-    metric = env.get("AUTOML_EVAL_METRIC", "roc_auc")
+    preset = env.get("AUTOML_PRESET", "speed") if preset is None else preset
+    metric = env.get("AUTOML_EVAL_METRIC", "roc_auc") if metric is None else metric
     if preset not in {"speed", "balanced"}:
         raise ValueError("Use the GA speed or balanced preset for this workshop")
     if metric not in {"roc_auc", "f1", "accuracy"}:
         raise ValueError("Use roc_auc, f1 or accuracy as AUTOML_EVAL_METRIC")
-    top_n = int(env.get("AUTOML_TOP_N", "1"))
+    try:
+        top_n = int(env.get("AUTOML_TOP_N", "1") if top_n is None else top_n)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("AUTOML_TOP_N must be an integer between 1 and 10") from exc
     if not 1 <= top_n <= 10:
         raise ValueError("AUTOML_TOP_N must be between 1 and 10")
     return {
@@ -247,12 +304,19 @@ def _without_sdk_links():
             yield
 
 
-def submit_experiment(client, manifest, *, new_run=False):
+def submit_experiment(client, manifest, *, new_run=False, preset=None, metric=None,
+                      top_n=None, experiment_name=None):
     """Resume the recorded run by default, avoiding accidental duplicate training."""
     if (OUTPUTS / "run.json").exists() and not new_run:
-        return read("run.json")
+        saved = read("run.json")
+        print(f"Reusing saved run {saved['run_id']}. To apply changed inputs or settings, set START_NEW_RUN=True for one execution.")
+        return saved
     env = settings()
-    args = pipeline_arguments(manifest)
+    args = pipeline_arguments(manifest, preset=preset, metric=metric, top_n=top_n)
+    experiment_name = (env.get("EXPERIMENT_NAME", "fraud-detection-automl")
+                       if experiment_name is None else experiment_name)
+    if not experiment_name.strip():
+        raise ValueError("EXPERIMENT_NAME must not be empty")
     name = env.get("MANAGED_PIPELINE_NAME", "autogluon-tabular-training-pipeline")
     pipeline_id = client.get_pipeline_id(name)
     if not pipeline_id:
@@ -273,7 +337,7 @@ def submit_experiment(client, manifest, *, new_run=False):
         raise RuntimeError(f"Managed pipeline version lacks {sorted(missing)}. Update the installed AutoML pipeline.")
     with _without_sdk_links():
         experiment = client.create_experiment(
-            name=env.get("EXPERIMENT_NAME", "fraud-detection-automl"),
+            name=experiment_name,
             namespace=required("RHOAI_PROJECT"),
         )
     job_name = "fraud-automl-" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -284,6 +348,7 @@ def submit_experiment(client, manifest, *, new_run=False):
         )
     record = {"run_id": run.run_id, "pipeline_id": pipeline_id,
               "pipeline_version_id": version_id, "project": required("RHOAI_PROJECT"),
+              "experiment_name": experiment_name,
               "arguments": args, "data": manifest, "state": "SUBMITTED",
               "submitted_at": datetime.now(timezone.utc).isoformat(),
               "artifact_bucket": env.get("S3_ARTIFACTS_BUCKET") or manifest["bucket"],
@@ -292,12 +357,34 @@ def submit_experiment(client, manifest, *, new_run=False):
     return record
 
 
-def monitor_experiment(client):
+def monitor_experiment(client=None):
     """Poll with progress; persist terminal state and server-measured duration."""
+    from kfp_server_api.exceptions import ApiException
+
     record = read("run.json")
     deadline = time.monotonic() + int(settings().get("PIPELINE_TIMEOUT_SECONDS", "10800"))
     while True:
-        detail = client.get_run(record["run_id"])
+        try:
+            if client is None:
+                client = kfp_client()
+            detail = client.get_run(record["run_id"])
+        except ApiException as exc:
+            if exc.status == 401:
+                raise RuntimeError(
+                    f"Pipeline API returned HTTP 401 while monitoring run {record['run_id']}. "
+                    "RHOAI_TOKEN may be expired or invalid. Renew oc login if needed, "
+                    "obtain the current token with oc whoami -t, and update RHOAI_TOKEN in automl/.env. "
+                    "A workbench/kernel RHOAI_TOKEN overrides the file; update that value or restart the kernel if needed. "
+                    "Then rerun wf.monitor_experiment() to read current credentials and monitor the same run. "
+                    "This monitoring error did not cancel the run; no new submission or upload is needed."
+                ) from None
+            if exc.status == 403:
+                raise RuntimeError(
+                    f"Pipeline API returned HTTP 403 while monitoring run {record['run_id']}. "
+                    "Check that the identity used by RHOAI_TOKEN can read runs in the saved project's pipeline server. "
+                    "After correcting access, rerun wf.monitor_experiment(). The run was not canceled."
+                ) from None
+            raise
         run = getattr(detail, "run", detail)
         state = getattr(run, "state", None)
         state = str(getattr(state, "name", state)).upper()
@@ -358,7 +445,14 @@ def collect_results(s3):
     test_bytes = s3.get_object(Bucket=bucket, Key=test_keys[0])["Body"].read()
     test = (pd.read_parquet(BytesIO(test_bytes)) if test_keys[0].endswith(".parquet")
             else pd.read_csv(BytesIO(test_bytes)))
-    source = pd.read_csv(ROOT.parent / "data/test.csv")
+    # Compare with the exact uploaded file recorded for this run, not today's
+    # local sample file or a new path chosen after training.
+    source_dataset = run["data"]["datasets"]["test"]
+    source_bytes = s3.get_object(
+        Bucket=run["data"]["bucket"], Key=source_dataset["key"])["Body"].read()
+    if hashlib.sha256(source_bytes).hexdigest() != source_dataset["sha256"]:
+        raise RuntimeError("The uploaded test CSV changed after staging. Use the original run's immutable inputs or submit a new run.")
+    source = pd.read_csv(BytesIO(source_bytes))
     pd.testing.assert_frame_equal(
         test[FEATURES + [LABEL]].reset_index(drop=True),
         source[FEATURES + [LABEL]].reset_index(drop=True), check_dtype=False,
