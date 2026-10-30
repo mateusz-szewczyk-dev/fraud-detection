@@ -614,7 +614,8 @@ class WorkflowTests(unittest.TestCase):
 class NotebookTests(unittest.TestCase):
     def test_notebooks_validate_and_have_valid_python(self):
         root = Path(__file__).resolve().parents[1]
-        for path in sorted(root.glob("*.ipynb")):
+        paths = [*root.glob("*.ipynb"), *(root / "ui").glob("*.ipynb")]
+        for path in sorted(paths):
             notebook = nbformat.read(path, as_version=4)
             nbformat.validate(notebook)
             for cell in notebook.cells:

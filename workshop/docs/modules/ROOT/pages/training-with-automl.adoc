@@ -4,7 +4,11 @@
 = Train and serve fraud detection with AutoML
 
 This optional chapter provides an alternative training and serving flow for the same credit-card transactions: explore the data, submit a managed AutoML experiment, inspect its leaderboard, deploy the selected predictor, and score Sally's transactions.
-The existing manual training chapters remain available. Complete the prerequisites below, then follow the four notebooks in the repository's `automl/` folder. You can skip the Keras training and ONNX export chapters for this flow.
+The existing manual training chapters remain available. Complete the prerequisites below, then follow the four executable notebooks in the repository's `automl/` folder. You can skip the Keras training and ONNX export chapters for this flow.
+
+For the dashboard alternative, see xref:training-with-automl-ui.adoc[Follow AutoML through the UI]. That route uses four Markdown-only notebooks in `automl/ui/`, with screenshots and manual evidence worksheets. It can reuse the same staged S3 data without submitting another run through code.
+
+The native AutoML UI currently accepts training data only and derives an internal evaluation split. It does not expose a separate test dataset selector; that capability is planned for a later release. The code route below explicitly supplies an external test CSV, so the two evaluation scores should not be treated as directly comparable.
 
 == Prerequisites
 

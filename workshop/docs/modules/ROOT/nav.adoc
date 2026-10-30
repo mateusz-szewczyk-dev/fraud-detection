@@ -40,3 +40,4 @@
 
 * 7. Train and serve with AutoML (alternative flow)
 ** xref:training-with-automl.adoc[1. Run an experiment, deploy, and predict]
+** xref:training-with-automl-ui.adoc[2. Follow the UI walkthrough]
